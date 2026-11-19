@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Генератор озвучиваемой статьи</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; line-height: 1.6; max-width: 800px; }
+        #status { margin-top: 15px; color: #555; line-height: 1.5; }
+        [hidden] { display: none !important; }
+
+        .card {
+            margin-top: 20px;
+            padding: 18px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background: #fafafa;
+        }
+        .card h3 { margin: 0 0 8px; font-size: 18px; }
+        .card .meta { color: #666; font-size: 14px; margin-bottom: 14px; word-break: break-all; }
+
+        .open-link {
+            display: inline-block;
+            padding: 12px 22px;
+            background: #1a73e8;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .open-link:hover { background: #1662c4; }
+
+        .hint { margin-top: 14px; font-size: 14px; color: #555; }
+        .hint code { background: #eee; padding: 1px 5px; border-radius: 3px; }
+
+        .secondary-btn {
+            font: inherit;
+            background: none;
+            border: 1px solid #bbb;
+            border-radius: 6px;
+            padding: 6px 14px;
+            cursor: pointer;
+            margin-top: 14px;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Загрузите текстовый файл (.txt)</h2>
+    <input type="file" id="fileInput" accept=".txt,.text,text/plain">
+    <div id="status"></div>
+
+    <div id="result" class="card" hidden>
+        <h3>Статья готова</h3>
+        <div class="meta" id="resultMeta"></div>
+
+        <!-- Обычная ссылка: новая вкладка открывается по клику, без разрешений на попапы -->
+        <a id="openLink"
+           class="open-link"
+           href="#"
+           target="_blank"
+           rel="noopener noreferrer">Открыть статью в новой вкладке →</a>
+
+        <div class="hint">
+            После открытия вкладки дождитесь полной загрузки и откройте меню Chrome (⋮) —
+            там появится пункт <code>Прослушать эту страницу</code>.
+        </div>
+
+        <button type="button" id="resetBtn" class="secondary-btn">Выбрать другой файл</button>
+    </div>
+
+    <script>
+    (function () {
+        const fileInput  = document.getElementById('fileInput');
+        const statusEl   = document.getElementById('status');
+        const result     = document.getElementById('result');
+        const resultMeta = document.getElementById('resultMeta');
+        const openLink   = document.getElementById('openLink');
+        const resetBtn   = document.getElementById('resetBtn');
+
+        const CACHE_NAME = 'articles-v1';
+
+        let currentBlobUrl = null;
+
+        // ---------- Регистрация Service Worker ----------
+        // sw.js лежит рядом с temp.html, поэтому scope = каталог страницы.
+        let swReady = null;
+        if ('serviceWorker' in navigator) {
+            swReady = navigator.serviceWorker
+                .register('./sw.js')
+                .then(() => navigator.serviceWorker.ready)
+                .catch(err => {
+                    console.warn('Service Worker не зарегистрирован:', err);
+                    return null;
+                });
+        }
+
+        // ---------- Утилиты ----------
+        function setStatus(msg) { statusEl.textContent = msg; }
+
+        function releaseBlob() {
+            if (currentBlobUrl) {
+                URL.revokeObjectURL(currentBlobUrl);
+                currentBlobUrl = null;
+            }
+        }
+
+        function makeId() {
+            if (window.crypto && typeof crypto.randomUUID === 'function') {
+                return crypto.randomUUID();
+            }
+            // запасной вариант для старых браузеров
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0;
+                return (c === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);
+            });
+        }
+
+        function escapeHtml(s) {
+            return s
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function buildArticleHtml(text) {
+            const paragraphs = text.split(/\r?\n[ \t]*\r?\n/);
+            let body = '';
+            let count = 0;
+
+            paragraphs.forEach(paraText => {
+                const trimmed = paraText.replace(/^\s+|\s+$/g, '');
+                if (!trimmed) return;
+                const inner = escapeHtml(trimmed).replace(/\r?\n/g, '<br>');
+                body += '<p>' + inner + '</p>\n';
+                count++;
+            });
+
+            if (count === 0) return null;
+
+            return {
+                count: count,
+                html:
+                    '<!DOCTYPE html>\n' +
+                    '<html lang="ru">\n' +
+                    '<head>\n' +
+                    '<meta charset="UTF-8">\n' +
+                    '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+                    '<title>Озвучиваемая статья</title>\n' +
+                    '<style>\n' +
+                    '  body { font-family: sans-serif; margin: 20px; line-height: 1.6; max-width: 800px; }\n' +
+                    '  article { padding: 10px; }\n' +
+                    '  article p { margin: 0 0 1em; }\n' +
+                    '</style>\n' +
+                    '</head>\n' +
+                    '<body>\n' +
+                    '<article class="read-aloud" lang="ru">\n' +
+                    body +
+                    '</article>\n' +
+                    '</body>\n' +
+                    '</html>'
+            };
+        }
+
+        // ---------- Основной обработчик ----------
+        fileInput.addEventListener('change', async function (event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+
+            releaseBlob();
+            result.hidden = true;
+            setStatus('Чтение файла…');
+
+            try {
+                const buffer = await file.arrayBuffer();
+
+                // 1. Пробуем строгий UTF-8, при ошибке — windows-1251.
+                let text;
+                try {
+                    text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+                } catch (err) {
+                    try {
+                        text = new TextDecoder('windows-1251').decode(buffer);
+                    } catch (err2) {
+                        setStatus('Не удалось определить кодировку файла.');
+                        return;
+                    }
+                }
+
+                const article = buildArticleHtml(text);
+                if (!article) {
+                    setStatus('В файле не найден текст. Проверьте, что файл не пустой.');
+                    return;
+                }
+
+                // 2. Пытаемся положить статью в Cache API и отдать её через SW.
+                let mode = 'blob';
+                if (swReady) {
+                    try {
+                        await swReady; // ждём активации SW
+                        const id = makeId();
+                        const cache = await caches.open(CACHE_NAME);
+                        const key = new URL('./__article/' + id, location.href).href;
+                        await cache.put(key, new Response(article.html, {
+                            headers: { 'Content-Type': 'text/html;charset=utf-8' }
+                        }));
+                        // Ссылка вида ./article-<uuid>.html — физически файла нет,
+                        // ответ отдаёт sw.js из кэша.
+                        openLink.href = './article-' + id + '.html';
+                        mode = 'sw';
+                    } catch (err) {
+                        console.warn('Не удалось подготовить статью через SW:', err);
+                        // падаем в blob-резерв ниже
+                    }
+                }
+
+                // 3. Резерв: blob URL (если SW недоступен).
+                if (mode !== 'sw') {
+                    const blob = new Blob([article.html], { type: 'text/html;charset=utf-8' });
+                    currentBlobUrl = URL.createObjectURL(blob);
+                    openLink.href = currentBlobUrl;
+                }
+
+                resultMeta.textContent =
+                    'Файл: ' + file.name +
+                    ' · абзацев: ' + article.count +
+                    ' · режим: ' + (mode === 'sw' ? 'service worker (.html)' : 'blob');
+
+                result.hidden = false;
+                setStatus('');
+                openLink.focus();
+
+            } catch (err) {
+                setStatus('Не удалось прочитать файл: ' + (err && err.message ? err.message : err));
+            }
+        });
+
+        resetBtn.addEventListener('click', function () {
+            releaseBlob();
+            result.hidden = true;
+            fileInput.value = '';
+            setStatus('');
+            fileInput.focus();
+        });
+
+        window.addEventListener('pagehide', releaseBlob);
+    })();
+    </script>
+
+    <!--
+    Контракт с sw.js (который вы положите рядом, в корне репозитория GitHub Pages):
+
+      1. Регистрируется по адресу ./sw.js, поэтому его scope —
+         каталог, в котором лежит temp.html (и всё, что глубже).
+
+      2. sw.js должен перехватывать запросы, оканчивающиеся на
+             /article-<uuid>.html
+         и отдавать сохранённый HTML, найденный в кэше 'articles-v1'
+         по ключу:
+             <scope>/__article/<uuid>
+
+         Пример регулярки для события fetch:
+             /\/article-([a-f0-9-]+)\.html$/
+
+      3. Записи в кэше создаёт temp.html через caches.open('articles-v1').
+
+      4. Если запись в кэше не найдена, sw.js должен вернуть 404-страницу
+         с заголовком Content-Type: text/html;charset=utf-8.
+
+    Если sw.js не загрузится или в браузере отключён Service Worker,
+    temp.html автоматически откатится на blob URL — озвучка продолжит работать.
+    -->
+</body>
+</html>
