@@ -19,6 +19,8 @@
         .card h3 { margin: 0 0 8px; font-size: 18px; }
         .card .meta { color: #666; font-size: 14px; margin-bottom: 14px; word-break: break-all; }
 
+        .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+
         .open-link {
             display: inline-block;
             padding: 12px 22px;
@@ -30,6 +32,20 @@
             font-weight: 600;
         }
         .open-link:hover { background: #1662c4; }
+
+        .save-btn {
+            font: inherit;
+            font-size: 16px;
+            font-weight: 600;
+            padding: 12px 22px;
+            border-radius: 6px;
+            border: 1px solid #1a73e8;
+            background: #fff;
+            color: #1a73e8;
+            cursor: pointer;
+        }
+        .save-btn:hover { background: #eef4fd; }
+        .save-btn:active { background: #e1ecfb; }
 
         .hint { margin-top: 14px; font-size: 14px; color: #555; }
         .hint code { background: #eee; padding: 1px 5px; border-radius: 3px; }
@@ -55,12 +71,17 @@
         <h3>Статья готова</h3>
         <div class="meta" id="resultMeta"></div>
 
-        <!-- Обычная ссылка: новая вкладка открывается по клику, без разрешений на попапы -->
-        <a id="openLink"
-           class="open-link"
-           href="#"
-           target="_blank"
-           rel="noopener noreferrer">Открыть статью в новой вкладке →</a>
+        <div class="actions">
+            <!-- Обычная ссылка: новая вкладка открывается по клику, без разрешений на попапы -->
+            <a id="openLink"
+               class="open-link"
+               href="#"
+               target="_blank"
+               rel="noopener noreferrer">Открыть статью в новой вкладке →</a>
+
+            <!-- Сохранение готового HTML-файла на диск -->
+            <button type="button" id="saveBtn" class="save-btn">Сохранить HTML-файл</button>
+        </div>
 
         <div class="hint">
             После открытия вкладки дождитесь полной загрузки и откройте меню Chrome (⋮) —
@@ -77,14 +98,16 @@
         const result     = document.getElementById('result');
         const resultMeta = document.getElementById('resultMeta');
         const openLink   = document.getElementById('openLink');
+        const saveBtn    = document.getElementById('saveBtn');
         const resetBtn   = document.getElementById('resetBtn');
 
         const CACHE_NAME = 'articles-v1';
 
-        let currentBlobUrl = null;
+        let currentBlobUrl  = null;
+        let currentHtml     = null;   // готовый HTML статьи (для сохранения)
+        let currentFileName = 'article.html';
 
         // ---------- Регистрация Service Worker ----------
-        // sw.js лежит рядом с temp.html, поэтому scope = каталог страницы.
         let swReady = null;
         if ('serviceWorker' in navigator) {
             swReady = navigator.serviceWorker
@@ -110,7 +133,6 @@
             if (window.crypto && typeof crypto.randomUUID === 'function') {
                 return crypto.randomUUID();
             }
-            // запасной вариант для старых браузеров
             return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
                 const r = Math.random() * 16 | 0;
                 return (c === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);
@@ -125,10 +147,20 @@
                 .replace(/"/g, '&quot;');
         }
 
-        // ---------- Разбор исходного текста ----------
+        // Безопасное имя файла из заголовка статьи.
+        function makeFileName(title) {
+            let base = String(title || 'article')
+                .replace(/[\\/:*?"<>|\u0000-\u001F]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            // убираем точки/пробелы в конце — их не любят ФС Windows
+            base = base.replace(/[. ]+$/g, '');
+            if (!base) base = 'article';
+            if (base.length > 80) base = base.slice(0, 80).trim();
+            return base + '.html';
+        }
 
-        // Абзацы разделяются пустой строкой; переводы строк внутри абзаца
-        // сохраняются как <br>. BOM в начале файла отбрасываем.
+        // ---------- Разбор исходного текста ----------
         function splitBlocks(text) {
             return text
                 .replace(/^\uFEFF/, '')
@@ -137,22 +169,16 @@
                 .filter(Boolean);
         }
 
-        // Необязательная лёгкая разметка: "## Подзаголовок" в отдельной строке.
         function parseHeading(line) {
             const m = /^(#{1,6})[ \t]+(\S.*)$/.exec(line);
             return m ? { level: m[1].length, text: m[2].trim() } : null;
         }
 
         // ---------- Генерация страницы статьи ----------
-
         function buildArticleHtml(text, sourceName) {
             const blocks = splitBlocks(text);
             if (!blocks.length) return null;
 
-            // 1. Заголовок статьи.
-            //    - первая строка вида "# Заголовок" / "## Заголовок";
-            //    - либо первая короткая однострочная строка;
-            //    - иначе — имя файла без расширения.
             const first = blocks[0];
             const firstIsSingleLine = first.indexOf('\n') === -1;
             const firstAsHeading = firstIsSingleLine ? parseHeading(first) : null;
@@ -171,7 +197,6 @@
             }
             if (!title) title = 'Статья';
 
-            // 2. Тело статьи.
             const parts = [];
             let paragraphs = 0;
             let plainBody = '';
@@ -194,7 +219,6 @@
                 plainBody += ' ' + block;
             }
 
-            // 3. Метаданные страницы.
             const words = plainBody.split(/\s+/).filter(Boolean).length;
             const minutes = Math.max(1, Math.round(words / 180));
 
@@ -316,19 +340,73 @@ ${parts.join('\n')}
             };
         }
 
+        // ---------- Сохранение файла ----------
+        function downloadViaLink(blob, fileName) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            a.rel = 'noopener';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            // Дадим браузеру время начать загрузку, потом освободим URL.
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+        }
+
+        async function saveArticle() {
+            if (!currentHtml) return;
+
+            const fileName = currentFileName;
+            const blob = new Blob([currentHtml], { type: 'text/html;charset=utf-8' });
+
+            // 1. Нативный диалог сохранения (Chromium, secure context, жест пользователя).
+            if (typeof window.showSaveFilePicker === 'function') {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: fileName,
+                        types: [{
+                            description: 'HTML-файл',
+                            accept: { 'text/html': ['.html', '.htm'] }
+                        }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                    setStatus('Файл сохранён: ' + (handle.name || fileName));
+                    return;
+                } catch (err) {
+                    if (err && err.name === 'AbortError') {
+                        // Пользователь закрыл диалог — ничего не делаем.
+                        return;
+                    }
+                    console.warn('showSaveFilePicker не сработал, используем скачивание:', err);
+                }
+            }
+
+            // 2. Резерв — обычное скачивание.
+            try {
+                downloadViaLink(blob, fileName);
+                setStatus('Файл сохранён: ' + fileName);
+            } catch (err) {
+                setStatus('Не удалось сохранить файл: ' + (err && err.message ? err.message : err));
+            }
+        }
+
         // ---------- Основной обработчик ----------
         fileInput.addEventListener('change', async function (event) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
 
             releaseBlob();
+            currentHtml = null;
+            currentFileName = 'article.html';
             result.hidden = true;
             setStatus('Чтение файла…');
 
             try {
                 const buffer = await file.arrayBuffer();
 
-                // 1. Пробуем строгий UTF-8, при ошибке — windows-1251.
                 let text;
                 try {
                     text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
@@ -347,28 +425,27 @@ ${parts.join('\n')}
                     return;
                 }
 
-                // 2. Пытаемся положить статью в Cache API и отдать её через SW.
+                // Запоминаем для кнопки «Сохранить».
+                currentHtml = article.html;
+                currentFileName = makeFileName(article.title);
+
                 let mode = 'blob';
                 if (swReady) {
                     try {
-                        await swReady; // ждём активации SW
+                        await swReady;
                         const id = makeId();
                         const cache = await caches.open(CACHE_NAME);
                         const key = new URL('./__article/' + id, location.href).href;
                         await cache.put(key, new Response(article.html, {
                             headers: { 'Content-Type': 'text/html;charset=utf-8' }
                         }));
-                        // Ссылка вида ./article-<uuid>.html — физически файла нет,
-                        // ответ отдаёт sw.js из кэша.
                         openLink.href = './article-' + id + '.html';
                         mode = 'sw';
                     } catch (err) {
                         console.warn('Не удалось подготовить статью через SW:', err);
-                        // падаем в blob-резерв ниже
                     }
                 }
 
-                // 3. Резерв: blob URL (если SW недоступен).
                 if (mode !== 'sw') {
                     const blob = new Blob([article.html], { type: 'text/html;charset=utf-8' });
                     currentBlobUrl = URL.createObjectURL(blob);
@@ -390,8 +467,12 @@ ${parts.join('\n')}
             }
         });
 
+        saveBtn.addEventListener('click', saveArticle);
+
         resetBtn.addEventListener('click', function () {
             releaseBlob();
+            currentHtml = null;
+            currentFileName = 'article.html';
             result.hidden = true;
             fileInput.value = '';
             setStatus('');
@@ -403,27 +484,13 @@ ${parts.join('\n')}
     </script>
 
     <!--
-    Контракт с sw.js (который вы положите рядом, в корне репозитория GitHub Pages):
+    Контракт с sw.js — без изменений.
 
-      1. Регистрируется по адресу ./sw.js, поэтому его scope —
-         каталог, в котором лежит temp.html (и всё, что глубже).
-
-      2. sw.js должен перехватывать запросы, оканчивающиеся на
-             /article-<uuid>.html
-         и отдавать сохранённый HTML, найденный в кэше 'articles-v1'
-         по ключу:
-             <scope>/__article/<uuid>
-
-         Пример регулярки для события fetch:
-             /\/article-([a-f0-9-]+)\.html$/
-
-      3. Записи в кэше создаёт temp.html через caches.open('articles-v1').
-
-      4. Если запись в кэше не найдена, sw.js должен вернуть 404-страницу
-         с заголовком Content-Type: text/html;charset=utf-8.
-
-    Если sw.js не загрузится или в браузере отключён Service Worker,
-    temp.html автоматически откатится на blob URL — озвучка продолжит работать.
+    Кнопка «Сохранить HTML-файл»:
+      • использует showSaveFilePicker (Chromium) для выбора места сохранения;
+      • при отмене диалога ничего не происходит;
+      • если API недоступен (Firefox/Safari) — обычное скачивание
+        с именем из заголовка статьи.
     -->
 </body>
 </html>
