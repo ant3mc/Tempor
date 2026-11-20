@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Генератор озвучиваемой статьи</title>
+</head>
+<body style="padding-top: 2px; padding-bottom: 2px;">
+
+<h1>Генератор озвучиваемой статьи</h1>
+<p>Загрузите текстовый файл (.txt)</p>
+<input type="file" id="fileInput" accept=".txt">
+<button id="convertBtn">Статья готова</button>
+<a id="downloadLink" style="display:none;">Сохранить HTML-файл</a>
+<button id="resetBtn" style="display:none;">Выбрать другой файл</button>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const convertBtn = document.getElementById('convertBtn');
+const downloadLink = document.getElementById('downloadLink');
+const resetBtn = document.getElementById('resetBtn');
+
+convertBtn.addEventListener('click', () => {
+    const file = fileInput.files[0];
+    if (!file) {
+        alert('Сначала выберите текстовый файл.');
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        let text = e.target.result;
+
+        // Замена **текст** на <strong>текст</strong>
+        text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+        // Разбиение на абзацы по пустым строкам
+        const paragraphs = text.split(/\n\s*\n/);
+        const htmlParagraphs = paragraphs.map(p =>
+            '<p>' + p.replace(/\n/g, '<br>') + '</p>'
+        ).join('');
+
+        const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Статья</title>
+</head>
+<body style="padding-top: 2px; padding-bottom: 2px;">
+${htmlParagraphs}
+</body>
+</html>`;
+
+        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        downloadLink.href = url;
+        downloadLink.download = 'article.html';
+        downloadLink.style.display = 'inline';
+        resetBtn.style.display = 'inline';
+    };
+    reader.readAsText(file, 'UTF-8');
+});
+
+resetBtn.addEventListener('click', () => {
+    fileInput.value = '';
+    downloadLink.style.display = 'none';
+    resetBtn.style.display = 'none';
+    if (downloadLink.href) URL.revokeObjectURL(downloadLink.href);
+});
+</script>
+
+</body>
+</html>
