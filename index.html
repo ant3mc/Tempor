@@ -44,12 +44,29 @@
             cursor: pointer;
             margin-top: 14px;
         }
+
+        .option {
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+            margin-top: 12px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .option input { margin: 4px 0 0; flex: none; }
+        .option code { font-size: 14px; background: #eee; padding: 1px 4px; border-radius: 3px; }
     </style>
 </head>
 <body>
 
-    <h2>Загрузите текстовый файл (.txt)</h2>
-    <input type="file" id="fileInput" accept=".txt,.text,text/plain">
+    <h2>Загрузите текстовый файл (.txt или .md)</h2>
+    <input type="file" id="fileInput" accept=".txt,.text,.md,text/plain,text/markdown">
+
+    <label class="option">
+        <input type="checkbox" id="strongToggle">
+        <span>Заменять <code>**текст**</code> на <code>&lt;strong&gt;текст&lt;/strong&gt;</code></span>
+    </label>
+
     <div id="status"></div>
 
     <div id="result" class="card" hidden>
@@ -66,15 +83,18 @@
 
     <script>
     (function () {
-        const fileInput  = document.getElementById('fileInput');
-        const statusEl   = document.getElementById('status');
-        const result     = document.getElementById('result');
-        const resultMeta = document.getElementById('resultMeta');
-        const saveBtn    = document.getElementById('saveBtn');
-        const resetBtn   = document.getElementById('resetBtn');
+        const fileInput    = document.getElementById('fileInput');
+        const statusEl     = document.getElementById('status');
+        const result       = document.getElementById('result');
+        const resultMeta   = document.getElementById('resultMeta');
+        const saveBtn      = document.getElementById('saveBtn');
+        const resetBtn     = document.getElementById('resetBtn');
+        const strongToggle = document.getElementById('strongToggle');
 
         let currentHtml     = null;   // готовый HTML статьи (для сохранения)
         let currentFileName = 'article.html';
+        let currentText     = null;   // исходный текст (для перегенерации)
+        let currentSource   = '';     // имя исходного файла
 
         // ---------- Утилиты ----------
         function setStatus(msg) { statusEl.textContent = msg; }
@@ -85,6 +105,11 @@
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
+        }
+
+        // **текст** -> <strong>текст</strong> (в уже экранированной строке)
+        function applyStrong(s) {
+            return s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>');
         }
 
         // Безопасное имя файла из заголовка статьи.
@@ -115,7 +140,7 @@
         }
 
         // ---------- Генерация страницы статьи ----------
-        function buildArticleHtml(text, sourceName) {
+        function buildArticleHtml(text, sourceName, convertStrong) {
             const blocks = splitBlocks(text);
             if (!blocks.length) return null;
 
@@ -151,7 +176,10 @@
                     continue;
                 }
 
-                const inner = escapeHtml(block).replace(/\r?\n/g, '<br>');
+                let inner = escapeHtml(block);
+                if (convertStrong) inner = applyStrong(inner);
+                inner = inner.replace(/\r?\n/g, '<br>');
+
                 parts.push(paragraphs === 0
                     ? `<p class="lead">${inner}</p>`
                     : `<p>${inner}</p>`);
@@ -323,6 +351,8 @@ ${parts.join('\n')}
 
             currentHtml = null;
             currentFileName = 'article.html';
+            currentText = null;
+            currentSource = '';
             result.hidden = true;
             setStatus('Чтение файла…');
 
@@ -341,13 +371,15 @@ ${parts.join('\n')}
                     }
                 }
 
-                const article = buildArticleHtml(text, file.name);
+                const article = buildArticleHtml(text, file.name, strongToggle.checked);
                 if (!article) {
                     setStatus('В файле не найден текст. Проверьте, что файл не пустой.');
                     return;
                 }
 
-                // Запоминаем для кнопки «Сохранить».
+                // Запоминаем для кнопки «Сохранить» и для перегенерации.
+                currentText = text;
+                currentSource = file.name;
                 currentHtml = article.html;
                 currentFileName = makeFileName(article.title);
 
@@ -365,11 +397,25 @@ ${parts.join('\n')}
             }
         });
 
+        // Переключение настройки: если файл уже загружен — пересобираем статью.
+        strongToggle.addEventListener('change', function () {
+            if (currentText === null) return;
+
+            const article = buildArticleHtml(currentText, currentSource, strongToggle.checked);
+            if (!article) return;
+
+            currentHtml = article.html;
+            currentFileName = makeFileName(article.title);
+            setStatus('');
+        });
+
         saveBtn.addEventListener('click', saveArticle);
 
         resetBtn.addEventListener('click', function () {
             currentHtml = null;
             currentFileName = 'article.html';
+            currentText = null;
+            currentSource = '';
             result.hidden = true;
             fileInput.value = '';
             setStatus('');
@@ -382,11 +428,17 @@ ${parts.join('\n')}
     Открытие в новой вкладке удалено вместе с service worker, кэшем,
     blob-предпросмотром и подсказкой про меню Chrome. Файл sw.js не нужен.
 
+    Поддерживаются файлы .txt и .md — обработка одинаковая.
+
     Кнопка «Сохранить HTML-файл»:
       • использует showSaveFilePicker (Chromium) для выбора места сохранения;
       • при отмене диалога ничего не происходит;
       • если API недоступен (Firefox/Safari) — обычное скачивание
         с именем из заголовка статьи.
+
+    Галочка «Заменять **текст** на <strong>текст</strong>»:
+      • учитывается при сборке статьи; если файл уже загружен,
+        переключение галочки сразу пересобирает готовый HTML.
     -->
 </body>
 </html>
